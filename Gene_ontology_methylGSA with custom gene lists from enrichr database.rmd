@@ -1,0 +1,161 @@
+---
+title: "Gene Ontology Analsysis for Differential CpGs"
+author: "Gregory Rompala"
+date: "February 28, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Libraries
+```{r,message=FALSE}
+library(xlsx)
+library(dplyr)
+library(biomaRt)
+ensembl = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+```
+
+Directories
+```{r}
+one.base <- "/sc/arion/projects/DADisorders/greg.working/OUD.study/diffanalysis"
+```
+
+
+Significant CpGs
+```{r,message=FALSE}
+setwd(one.base)
+
+# Load in table for all methyl CpGs
+load("5mc.Chisq.Opioid.table.RData") #METH.O
+load("5hmc.Chisq.Opioid.table.RData") #HYDRO.O
+
+# Improving annotation of regions
+regions <- read.table("Regions/CelltypeSpecific_Regions.bed",sep="\t")
+library(regioneR)
+peak_set <- unique(regions$V4)
+hydroxyput <- HYDRO.O$coordinate
+methput <- METH.O$coordinate
+for(i in peak_set){
+  temp <- regions %>% dplyr::filter(V4==i)
+  OL <- overlapRegions(HYDRO.O[,2:4],temp[,1:3])
+  OL.meth <- overlapRegions(METH.O[,2:4],temp[,1:3])
+  hydroxyput  <- cbind(hydroxyput,ifelse(HYDRO.O$coordinate %in% paste(OL$chr,OL$startA,sep="."),"1","0"))
+  methput <- cbind(methput,ifelse(METH.O$coordinate %in% paste(OL.meth$chr,OL.meth$startA,sep="."),"1","0"))
+  }
+hydroxyput <- data.table::data.table(hydroxyput)
+methput <- data.table::data.table(methput)
+colnames(hydroxyput)[2:11] <- as.character(peak_set)
+colnames(methput)[2:11] <- as.character(peak_set)
+HYDRO.O <- cbind(HYDRO.O,hydroxyput[,2:11])
+METH.O <- cbind(METH.O,methput[,2:11])
+
+# Filtering for significant CpGs (p001=p<0.001, FDR=q<0.05,OnePer=p<0.001+1%effect size)
+
+#5hmC
+hmc.p001 <- HYDRO.O %>% filter(pvalue<0.001)
+hmc.OnePer <- HYDRO.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+hmc.FDR <- HYDRO.O %>% filter(qvalue<0.05)
+#5mC
+mc.p001 <- METH.O %>% filter(pvalue<0.001)
+mc.OnePer <- METH.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+mc.FDR <- METH.O %>% filter(qvalue<0.05)
+
+hmc.Tables <- list(p001=hmc.p001,OnePer=hmc.OnePer,FDR=hmc.FDR,ALL.CpGs=HYDRO.O)
+mc.Tables <-  list(p001=mc.p001,OnePer=mc.OnePer,FDR=mc.FDR,ALL.CpGs=METH.O)
+```
+
+Counting genes showing up the most for FDR adjusted genes
+```{r}
+freq.hmc <- data.frame(table(hmc.Tables$FDR$hgnc_symbol))
+freq.mc <- data.frame(table(mc.Tables$FDR$hgnc_symbol))
+genes <- unique(freq.hmc$Var1,freq.mc$Var1)
+out <- data.frame()
+for(i in genes){
+  hy <- ifelse(i %in% freq.hmc$Var1,freq.hmc[freq.hmc$Var1==i,2],0)
+  me <- ifelse(i %in% freq.mc$Var1,freq.mc[freq.mc$Var1==i,2],0)
+  sum <- data.frame(gene=i,hmc=hy,mc=me,total=hy+me)
+  out <- rbind(out,sum)}
+```
+
+Counting genes showing up the most for p<0.001
+```{r}
+freq.hmc <- data.frame(table(hmc.Tables$p001$hgnc_symbol))
+freq.mc <- data.frame(table(mc.Tables$p001$hgnc_symbol))
+genes <- unique(freq.hmc$Var1,freq.mc$Var1)
+out <- data.frame()
+for(i in genes){
+  hy <- ifelse(i %in% freq.hmc$Var1,freq.hmc[freq.hmc$Var1==i,2],0)
+  me <- ifelse(i %in% freq.mc$Var1,freq.mc[freq.mc$Var1==i,2],0)
+  sum <- data.frame(gene=i,hmc=hy,mc=me,total=hy+me)
+  out <- rbind(out,sum)}
+```
+
+
+
+methylGSA
+```{r}
+lib.dir="/sc/arion/projects/DADisorders/greg.working/OUD.study"
+library(methylGSA,lib.loc = lib.dir)
+library(dplyr)
+
+# Making Bioplanet
+bioplan <- read.xlsx("Bioplanet.xlsx",sheetIndex = 1,header = F)
+rownames(bioplan) <- bioplan$X1
+fix <- t(bioplan)
+new <- data.frame(fix[-1,])
+BIOPLAN <- list()
+for(list in colnames(new)){
+  temp <- as.vector(new[[list]])
+  temp <- temp[!(temp %in% c("",NA))]
+  BIOPLAN[[list]] <- temp}
+
+# Making PANTHER
+library(data.table)
+data <- readLines("Panther_2016.txt")
+data <- gsub("\t\t", "\t", data)
+panther <- data.frame(fread(text=data, sep="\t",header=FALSE,fill=TRUE))
+rownames(panther) <- panther$V1
+fix <- t(panther)
+new <- data.frame(fix[-1,])
+PANTHER <- list()
+for(list in colnames(new)){
+  temp <- as.vector(new[[list]])
+  temp <- temp[!(temp %in% c("",NA))]
+  PANTHER[[list]] <- temp
+  }
+
+data=list(mc=METH.O,hmc=HYDRO.O)
+# fullAnnot for 5hmC
+results <- list()
+for(i in c("mc","hmc")){
+Working <- data[[i]] %>% dplyr::filter(pvalue!=0 & hgnc_symbol!="")
+HMC <- Working %>% dplyr::select(coordinate,hgnc_symbol)
+FullAnnot <- prepareAnnot(HMC)
+cpg.pval <- Working$pvalue
+
+names(cpg.pval) <- Working$coordinate
+
+res1 = methylRRA(cpg.pval = cpg.pval, minsize = 10, FullAnnot = FullAnnot,
+            GS.type = "KEGG")
+res1=res1 %>% dplyr::select(-ID) %>% dplyr::mutate(dbase="KEGG")
+colnames(res1)[1] <- "ID"
+res2 = methylRRA(cpg.pval = cpg.pval, minsize = 10, FullAnnot = FullAnnot,
+             GS.list  = PANTHER)
+res2$dbase <- "PANTHER"
+res3 = methylRRA(cpg.pval = cpg.pval, minsize = 10, FullAnnot = FullAnnot,
+             GS.list = BIOPLAN)
+res3$dbase <- "BIOPLAN"
+
+heroin = methylRRA(cpg.pval = cpg.pval, minsize = 10,maxsize=2000, FullAnnot = FullAnnot,
+             GS.list = g)
+
+ontology <-rbind(res1,res2,res3) %>% arrange(padj)
+
+results[[i]] <- ontology
+
+}
+```

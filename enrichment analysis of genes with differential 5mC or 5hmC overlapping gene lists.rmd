@@ -1,0 +1,174 @@
+---
+title: "Overlap diffmarks genes with gene lists"
+author: "Gregory Rompala"
+date: "February 23, 2021"
+output: html_document
+---
+
+Libraries
+```{r,message=FALSE}
+library(xlsx)
+library(dplyr)
+library(biomaRt)
+ensembl = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+```
+
+Directories
+```{r}
+one.base <- "/sc/arion/projects/DADisorders/greg.working/OUD.study/diffanalysis"
+```
+
+
+Significant CpGs
+```{r}
+setwd(one.base)
+
+# Load in table for all methyl CpGs
+load("5mc.Chisq.Opioid.table.RData") #METH.O
+load("5hmc.Chisq.Opioid.table.RData") #HYDRO.O
+
+# Improving annotation of regions
+regions <- read.table("Regions/Master_regions.bed",sep="\t")
+library(regioneR)
+peak_set <- unique(regions$V4)
+hydroxyput <- HYDRO.O$coordinate
+methput <- METH.O$coordinate
+for(i in peak_set){
+  temp <- regions %>% dplyr::filter(V4==i)
+  OL <- overlapRegions(HYDRO.O[,2:4],temp[,1:3])
+  OL.meth <- overlapRegions(METH.O[,2:4],temp[,1:3])
+  hydroxyput  <- cbind(hydroxyput,ifelse(HYDRO.O$coordinate %in% paste(OL$chr,OL$startA,sep="."),"1","0"))
+  methput <- cbind(methput,ifelse(METH.O$coordinate %in% paste(OL.meth$chr,OL.meth$startA,sep="."),"1","0"))
+  }
+hydroxyput <- data.table::data.table(hydroxyput)
+methput <- data.table::data.table(methput)
+colnames(hydroxyput)[2:11] <- as.character(peak_set)
+colnames(methput)[2:11] <- as.character(peak_set)
+HYDRO.O <- cbind(HYDRO.O,hydroxyput[,2:11])
+METH.O <- cbind(METH.O,methput[,2:11])
+
+# Filtering for significant CpGs (p001=p<0.001, FDR=q<0.05,OnePer=p<0.001+1%effect size)
+
+#5hmC
+hmc.p001 <- HYDRO.O %>% filter(pvalue<0.001)
+hmc.OnePer <- HYDRO.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+hmc.FDR <- HYDRO.O %>% filter(qvalue<0.05)
+#5mC
+mc.p001 <- METH.O %>% filter(pvalue<0.001)
+mc.OnePer <- METH.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+mc.FDR <- METH.O %>% filter(qvalue<0.05)
+
+hmc.Tables <- list(p001=hmc.p001,OnePer=hmc.OnePer,FDR=hmc.FDR,ALL.CpGs=HYDRO.O)
+mc.Tables <-  list(p001=mc.p001,OnePer=mc.OnePer,FDR=mc.FDR,ALL.CpGs=METH.O)
+```
+
+# Overlaps with each gene list
+```{r}
+# Read in gene lists
+genelist <- read.csv("genelists.csv",header=T)
+
+hmc.genes <- lapply(hmc.Tables,function(L){
+             genes <- unique(L$hgnc_symbol)
+             genes <- genes[!(genes %in% c(NA,""))]
+             output <- length(genes)
+             for(i in colnames(genelist)){
+             x <- length(genes[(genes %in% genelist[[i]])==T])
+             output <- append(output,x)} 
+             names(output) <- c("num",colnames(genelist))
+             return(output)})
+out <- plyr::ldply(hmc.genes,rbind,.id="Test")
+
+
+mc.genes <- lapply(mc.Tables,function(L){
+             genes <- unique(L$hgnc_symbol)
+             genes <- genes[!(genes %in% c(NA,""))]
+             output <- length(genes)
+             for(i in colnames(genelist)){
+             x <- length(genes[(genes %in% genelist[[i]])==T])
+             output <- append(output,x)} 
+             names(output) <- c("num",colnames(genelist))
+             return(output)})
+mc.out <- plyr::ldply(mc.genes,rbind,.id="Test")         
+```
+
+Heroin genes
+```{r}
+heroin.genes <- genelist$Heroin.diffMeth
+shared.genes <- heroin.genes[heroin.genes %in% hmc.Tables$FDR$hgnc_symbol | heroin.genes %in% mc.Tables$FDR$hgnc_symbol]
+library("enrichR",lib="/sc/arion/projects/DADisorders/greg.working/OUD.study")
+ output <- enrichr(as.vector(shared.genes),"BioPlanet_2019")
+  Temp <- output[[1]] %>% arrange(P.value)
+
+```
+
+
+Overlap significance
+```{r}
+
+PVAL <- data.frame()
+OR <- data.frame()
+
+for(i in out$Test[1:(length(out$Test)-1)]){
+working <- out %>% filter(Test==i | Test=="ALL.CpGs")
+
+m <- apply(working[,-(1:2)],2,function(x){
+
+  Diff.In <-x[1]
+  Diff.Out <- working$num[1]-Diff.In
+  NC.In <- x[2]-x[1]
+  NC.Out <- working$num[2]-Diff.In-Diff.Out-NC.In
+  use <- c(Diff.In,Diff.Out,NC.In,NC.Out)
+  
+  Convictions <- matrix(use, nrow = 2,
+                       dimnames =
+                          list(c("Diff", "No Diff"),
+                               c("Feature", "Not Feature")))
+  x <- fisher.test(Convictions, conf.level = 0.95,alternative="greater") # Two-sided defaul
+  return(rbind(x$p.value,x$estimate))
+})
+pval <- data.frame(t(m[1,]))
+or <- data.frame(t(m[2,]))
+PVAL <- rbind(PVAL,pval)
+OR <- rbind(OR,or)
+#m[1]$Test <- i
+#m[2]$Test <- i
+#PVAL <- rbind(PVAL,m[1])
+#OR <- rbind(OR,m[2])
+}
+rownames(PVAL) <- as.character(out$Test[1:(length(out$Test)-1)])
+rownames(OR) <- as.character(out$Test[1:(length(out$Test)-1)])
+
+col.pal <- RColorBrewer::brewer.pal(6, "YlOrRd")
+
+convert <- -log10(PVAL)
+rownames(convert) <- c("p<0.001","p<0.001 and 1% effect","q<0.05")
+library(pheatmap)
+pheatmap(t(convert),angle_col = 45,color=col.pal,breaks=c(0,1,2,3,4,5,6))
+```
+
+Enrichr
+```{r}
+library("enrichR",lib="/sc/arion/projects/DADisorders/greg.working/OUD.")
+## The lists
+
+colnames(loaded) <- loaded[1,]
+v <- loaded[-1,]
+library(tidyr)
+v <- gather(v,key="list",value="gene")
+v <- v[!v$gene=="",]
+
+# "BioPlanet_2019"
+all.lists <- unique(v$list)[1:4]
+Output <- data.frame()
+for(x in all.lists){
+  genes <- v %>% filter(list==x) %>% dplyr::select(gene)
+  gene.id <- genes$gene
+  output <- enrichr(g,"KEGG_2019_Human")
+  Temp <- output[[1]] %>% arrange(P.value)
+  Temp$List <- x
+  Temp$List.size <- length(genes)
+  Output <- rbind(Output,Temp)
+}
+```
+

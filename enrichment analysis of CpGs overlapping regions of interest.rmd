@@ -1,0 +1,175 @@
+Libraries
+```{r,message=FALSE}
+library(xlsx)
+library(dplyr)
+library(biomaRt)
+ensembl = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+```
+
+Directories
+```{r}
+one.base <- "/sc/arion/projects/DADisorders/greg.working/OUD.study/diffanalysis"
+```
+
+
+Significant CpGs
+```{r}
+setwd(one.base)
+
+# Load in table for all methyl CpGs
+load("5mc.Chisq.Opioid.table.RData") #METH.O
+load("5hmc.Chisq.Opioid.table.RData") #HYDRO.O
+
+# Improving annotation of regions
+regions <- read.table("Regions/CelltypeSpecific_Regions.bed",sep="\t")
+library(regioneR)
+peak_set <- unique(regions$V4)
+hydroxyput <- HYDRO.O$coordinate
+methput <- METH.O$coordinate
+for(i in peak_set){
+  temp <- regions %>% dplyr::filter(V4==i)
+  OL <- overlapRegions(HYDRO.O[,2:4],temp[,1:3])
+  OL.meth <- overlapRegions(METH.O[,2:4],temp[,1:3])
+  hydroxyput  <- cbind(hydroxyput,ifelse(HYDRO.O$coordinate %in% paste(OL$chr,OL$startA,sep="."),"1","0"))
+  methput <- cbind(methput,ifelse(METH.O$coordinate %in% paste(OL.meth$chr,OL.meth$startA,sep="."),"1","0"))
+  }
+hydroxyput <- data.table::data.table(hydroxyput)
+methput <- data.table::data.table(methput)
+colnames(hydroxyput)[2:11] <- as.character(peak_set)
+colnames(methput)[2:11] <- as.character(peak_set)
+HYDRO.O <- cbind(HYDRO.O,hydroxyput[,2:11])
+METH.O <- cbind(METH.O,methput[,2:11])
+
+# Filtering for significant CpGs (p001=p<0.001, FDR=q<0.05,OnePer=p<0.001+1%effect size)
+
+#5hmC
+hmc.p001 <- HYDRO.O %>% filter(pvalue<0.001)
+hmc.OnePer <- HYDRO.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+hmc.FDR <- HYDRO.O %>% filter(qvalue<0.05)
+#5mC
+mc.p001 <- METH.O %>% filter(pvalue<0.001)
+mc.OnePer <- METH.O %>% filter(pvalue<0.001 & abs(meth.diff)>1)
+mc.FDR <- METH.O %>% filter(qvalue<0.05)
+
+hmc.Tables <- list(p001=hmc.p001,OnePer=hmc.OnePer,FDR=hmc.FDR,ALL.CpGs=HYDRO.O)
+mc.Tables <-  list(p001=mc.p001,OnePer=mc.OnePer,FDR=mc.FDR,ALL.CpGs=METH.O)
+```
+
+Summary statistics
+```{r}
+ok <- lapply(mc.Tables,function(L){
+       number=dim(L)[1]
+       hypo=L %>% filter(meth.diff<0) %>% summarise(n())
+       hyper=L %>% filter(meth.diff>0) %>% summarise(n())
+       prom=L %>% filter(prom==1) %>% summarise(n()) 
+       exon=L %>% filter(prom==0 & exon==1) %>% summarise(n())
+       intron=L %>% filter(prom==0 & exon==0 & intron==1) %>% summarise(n())
+       intergenic=L %>% filter(prom==0 & exon==0 & intron==0) %>% summarise(n())
+       CpGi <- L%>% filter(CpGi==1) %>% summarise(n())
+       shores <- L %>% filter(shores==1) %>% summarise(n())
+       diffGLU_GABA.hmc <- L %>% filter(GABAhypo.hmC=="1" | hypoGLU.hmC=="1") %>% summarise(n())
+       diffGLU_GABA.mc <-  L %>% filter(GABAhypo.mC=="1" | GLUhypo.mC=="1") %>% summarise(n())
+       diffNEU.tmC <- L %>% filter(NeuronHypo.tmC=="1"|Neuron.Hyper.tmC=="1") %>% summarise(n())
+       NEUsp.H3K27ac <- L %>% filter(`NEURON-H3K27ac`=="1") %>% summarise(n())
+       GLUsp.H3K27ac <- L %>% filter(`GLU-H3K27ac`=="1") %>% summarise(n())
+       GABAsp.H3K27ac <- L %>% filter(`GABA-H3K27ac`=="1") %>% summarise(n())
+       NonSpec.H3K27ac <- L %>% filter(`NonSpec-H3K27ac`=="1") %>% summarise(n())
+       NEU_H3K27ac <-  L %>% filter(`NonSpec-H3K27ac`=="1" | `GABA-H3K27ac`=="1"|`GLU-H3K27ac`=="1"|`NEURON-H3K27ac`=="1") %>% summarise(n())
+       
+       
+       return(cbind(num=number,
+                    Hypo=hypo[,1],
+                    Hyper=hyper[,1],
+                    prom=prom[,1],
+                    exon=exon[,1],
+                    intron=intron[,1],
+                    intergenic=intergenic[,1],
+                    CpGi=CpGi[,1],
+                    CpGshores=shores[,1],
+                    GLU.GABA_hmc=diffGLU_GABA.hmc[,1],
+                    GLU.GABA_mc=diffGLU_GABA.mc[,1],
+                    diffNEU.tmC=diffNEU.tmC[,1],
+                    NEUsp.H3K27ac=NEUsp.H3K27ac[,1],
+                    GLUsp.H3K27ac=GLUsp.H3K27ac[,1],
+                    GABAsp.H3K27ac=GABAsp.H3K27ac[,1],
+                    NonSpec.H3K27ac=NonSpec.H3K27ac[,1],
+                    NEU_H3K27ac=NEU_H3K27ac[,1]
+                    ))
+                    
+})
+
+out <- plyr::ldply(ok,rbind,.id="Test")
+```
+
+Overlap significance
+```{r}
+
+
+PVAL <- data.frame()
+OR <- data.frame()
+
+for(i in out$Test[1:(length(out$Test)-1)]){
+working <- out %>% filter(Test==i | Test=="ALL.CpGs")
+
+m <- apply(working[,-(1:2)],2,function(x){
+
+  Diff.In <-x[1]
+  Diff.Out <- working$num[1]-Diff.In
+  NC.In <- x[2]-x[1]
+  NC.Out <- working$num[2]-Diff.In-Diff.Out-NC.In
+  use <- c(Diff.In,Diff.Out,NC.In,NC.Out)
+  
+  Convictions <- matrix(use, nrow = 2,
+                       dimnames =
+                          list(c("Diff", "No Diff"),
+                               c("Feature", "Not Feature")))
+  x <- fisher.test(Convictions, conf.level = 0.95,alternative="greater") # Two-sided defaul
+  return(rbind(x$p.value,x$estimate))
+})
+pval <- data.frame(t(m[1,]))
+or <- data.frame(t(m[2,]))
+PVAL <- rbind(PVAL,pval)
+OR <- rbind(OR,or)
+#m[1]$Test <- i
+#m[2]$Test <- i
+#PVAL <- rbind(PVAL,m[1])
+#OR <- rbind(OR,m[2])
+}
+rownames(PVAL) <- as.character(out$Test[1:(length(out$Test)-1)])
+rownames(OR) <- as.character(out$Test[1:(length(out$Test)-1)])
+
+col.pal <- RColorBrewer::brewer.pal(6, "YlOrRd")
+
+convert <- -log10(PVAL)
+library(pheatmap)
+pheatmap(t(convert),angle_col = 45,color=col.pal,breaks=c(0,1,2,3,4,5,6))
+
+```
+
+
+Enrichr
+```{r}
+library("enrichR",lib="/sc/arion/projects/DADisorders/greg.working/OUD.")
+## The lists
+
+colnames(loaded) <- loaded[1,]
+v <- loaded[-1,]
+library(tidyr)
+v <- gather(v,key="list",value="gene")
+v <- v[!v$gene=="",]
+
+# "BioPlanet_2019"
+all.lists <- unique(v$list)[1:4]
+Output <- data.frame()
+for(x in all.lists){
+  genes <- v %>% filter(list==x) %>% dplyr::select(gene)
+  gene.id <- genes$gene
+  output <- enrichr(g,"KEGG_2019_Human")
+  Temp <- output[[1]] %>% arrange(P.value)
+  Temp$List <- x
+  Temp$List.size <- length(genes)
+  Output <- rbind(Output,Temp)
+}
+
+```
